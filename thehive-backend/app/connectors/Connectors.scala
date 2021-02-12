@@ -2,15 +2,15 @@ package connectors
 
 import scala.collection.immutable
 
-import play.api.libs.json.{JsObject, Json}
+import play.api.libs.json.{ JsObject, Json }
 import play.api.mvc._
 import play.api.routing.sird.UrlContext
-import play.api.routing.{Router, SimpleRouter}
+import play.api.routing.{ Router, SimpleRouter }
 
 import com.google.inject.AbstractModule
-import javax.inject.{Inject, Singleton}
+import javax.inject.{ Inject, Singleton }
 import models.HealthStatus
-import net.codingwell.scalaguice.{ScalaModule, ScalaMultibinder}
+import net.codingwell.scalaguice.{ ScalaModule, ScalaMultibinder }
 
 trait Connector {
   val name: String
@@ -35,7 +35,7 @@ class ConnectorRouter @Inject()(connectors: immutable.Set[Connector], actionBuil
 
 abstract class ConnectorModule extends AbstractModule with ScalaModule {
 
-  def registerController[C <: Connector](implicit evidence: Manifest[C]): Unit = {
+  def registerController[C <: Connector: Manifest]: Unit = {
     val connectorBindings = ScalaMultibinder.newSetBinder[Connector](binder)
     connectorBindings.addBinding.to[C]
     ()

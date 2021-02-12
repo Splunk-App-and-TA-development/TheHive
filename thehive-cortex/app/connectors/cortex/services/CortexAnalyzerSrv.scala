@@ -5,13 +5,11 @@ import java.util.Date
 
 import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.{ExecutionContext, Future, Promise}
-import scala.util.Try
+import scala.util.{Success, Try}
 import scala.util.control.NonFatal
-
 import play.api.Logger
 import play.api.libs.json._
 import play.api.libs.ws.WSClient
-
 import akka.NotUsed
 import akka.actor.{Actor, ActorSystem}
 import akka.stream.Materializer
@@ -21,7 +19,6 @@ import connectors.cortex.models._
 import javax.inject.{Inject, Singleton}
 import models.{Artifact, Case}
 import services.{UserSrv ⇒ _, _}
-
 import org.elastic4play.controllers.{Fields, FileInputValue}
 import org.elastic4play.database.{DBRemove, ModifyConfig}
 import org.elastic4play.services.JsonFormat.attachmentFormat
@@ -54,7 +51,7 @@ class JobReplicateActor @Inject()(cortexSrv: CortexAnalyzerSrv, eventSrv: EventS
         ._1
         .mapAsyncUnordered(5) { job ⇒
           val baseFields = Fields(
-            job.attributes - "_id" - "_routing" - "_parent" - "_type" - "_version" - "createdBy" - "createdAt" - "updatedBy" - "updatedAt" - "user"
+            job.attributes - "_id" - "_routing" - "_parent" - "_type" -  "_seqNo" - "_primaryTerm" - "createdBy" - "createdAt" - "updatedBy" - "updatedAt" - "user"
           )
           val createdJob = cortexSrv.create(newArtifact, baseFields)(authContext)
           createdJob
@@ -139,7 +136,7 @@ class CortexAnalyzerSrv @Inject()(
   def realDeleteJob(job: Job): Future[Unit] =
     dbRemove(job).map(_ ⇒ ())
 
-  def stats(query: QueryDef, aggs: Seq[Agg]) = findSrv(jobModel, query, aggs: _*)
+  def stats(query: QueryDef, aggs: Seq[Agg]): Future[JsObject] = findSrv(jobModel, query, aggs: _*)
 
   def getAnalyzer(analyzerId: String): Future[Analyzer] =
     Future
@@ -247,7 +244,7 @@ class CortexAnalyzerSrv @Inject()(
               _ ← artifactSrv.update(
                 job.artifactId(),
                 Fields.empty.set("reports", newReports.toString),
-                ModifyConfig(retryOnConflict = 0, version = Some(artifact.version))
+                ModifyConfig(retryOnConflict = 0, seqNoAndPrimaryTerm = Some(artifact.seqNo -> artifact.primaryTerm))
               )
             } yield ()
           }.recover {
@@ -266,7 +263,6 @@ class CortexAnalyzerSrv @Inject()(
       cortex
         .getAttachment(id)
         .flatMap(src ⇒ src.runWith(FileIO.toPath(file)))
-        .flatMap(ioResult ⇒ Future.fromTry(ioResult.status))
         .flatMap(_ ⇒ attachmentSrv.save(fiv))
         .andThen { case _ ⇒ Files.delete(file) }
         .map(a ⇒ Some(artifact + ("attachment" → Json.toJson(a))))
@@ -330,15 +326,22 @@ class CortexAnalyzerSrv @Inject()(
             .set("status", JobStatus.Failure.toString)
             .set("endDate", Json.toJson(new Date))
           update(jobId, jobFields)
-        case _ if maxRetryOnError > 0 ⇒
-          logger.debug(s"Request of status of job $cortexJobId in cortex ${cortex.name} fails, restarting ...")
+        /* Workaround */
+        case CortexError(500, _, body) if Try((Json.parse(body) \ "type").as[String]) == Success("akka.pattern.AskTimeoutException") ⇒
+          logger.debug("Got a 500 Timeout, retry")
+          updateJobWithCortex(jobId, cortexJobId, cortex)
+        case e if maxRetryOnError > 0 ⇒
+          logger.debug(s"Request of status of job $cortexJobId in cortex ${cortex.name} fails, restarting ...", e)
           val result = Promise[Job]
           system.scheduler.scheduleOnce(retryDelay) {
             updateJobWithCortex(jobId, cortexJobId, cortex, retryDelay, maxRetryOnError - 1).onComplete(result.complete)
           }
           result.future
-        case _ ⇒
-          logger.error(s"Request of status of job $cortexJobId in cortex ${cortex.name} fails and the number of errors reaches the limit, aborting")
+        case e ⇒
+          logger.error(
+            s"Request of status of job $cortexJobId in cortex ${cortex.name} fails and the number of errors reaches the limit, aborting",
+            e
+          )
           update(
             jobId,
             Fields
@@ -361,9 +364,20 @@ class CortexAnalyzerSrv @Inject()(
           }
 
       case None ⇒
-        Future.firstCompletedOf {
-          cortexConfig.instances.map(c ⇒ c.getAnalyzer(analyzerName).map(c → _))
-        }
+        Future
+          .traverse(cortexConfig.instances) { c ⇒
+            c.getAnalyzer(analyzerName)
+              .transform {
+                case Success(w) ⇒ Success(Some(c → w))
+                case _          ⇒ Success(None)
+              }
+          }
+          .flatMap { analyzers ⇒
+            analyzers
+              .flatten
+              .headOption
+              .fold[Future[(CortexClient, Analyzer)]](Future.failed(NotFoundError(s"Analyzer not found")))(Future.successful)
+          }
     }
 
     cortexClientAnalyzer.flatMap {

@@ -99,16 +99,16 @@ case class AssignCase(owner: String, status: ActionOperationStatus.Type = Action
 }
 
 object ActionOperation {
-  val addTagToCaseWrites      = Json.writes[AddTagToCase]
-  val addTagToArtifactWrites  = Json.writes[AddTagToArtifact]
-  val createTaskWrites        = Json.writes[CreateTask]
-  val addCustomFieldsWrites   = Json.writes[AddCustomFields]
-  val closeTaskWrites         = Json.writes[CloseTask]
-  val markAlertAsReadWrites   = Json.writes[MarkAlertAsRead]
-  val addLogToTaskWrites      = Json.writes[AddLogToTask]
-  val addTagToAlertWrites     = Json.writes[AddTagToAlert]
-  val addArtifactToCaseWrites = Json.writes[AddArtifactToCase]
-  val assignCaseWrites        = Json.writes[AssignCase]
+  val addTagToCaseWrites: OWrites[AddTagToCase] = Json.writes[AddTagToCase]
+  val addTagToArtifactWrites: OWrites[AddTagToArtifact] = Json.writes[AddTagToArtifact]
+  val createTaskWrites: OWrites[CreateTask] = Json.writes[CreateTask]
+  val addCustomFieldsWrites: OWrites[AddCustomFields] = Json.writes[AddCustomFields]
+  val closeTaskWrites: OWrites[CloseTask] = Json.writes[CloseTask]
+  val markAlertAsReadWrites: OWrites[MarkAlertAsRead] = Json.writes[MarkAlertAsRead]
+  val addLogToTaskWrites: OWrites[AddLogToTask] = Json.writes[AddLogToTask]
+  val addTagToAlertWrites: OWrites[AddTagToAlert] = Json.writes[AddTagToAlert]
+  val addArtifactToCaseWrites: OWrites[AddArtifactToCase] = Json.writes[AddArtifactToCase]
+  val assignCaseWrites: OWrites[AssignCase] = Json.writes[AssignCase]
   implicit val actionOperationReads: Reads[ActionOperation] = Reads[ActionOperation](
     json ⇒
       (json \ "type").asOpt[String].fold[JsResult[ActionOperation]](JsError("type is missing in action operation")) {
@@ -170,7 +170,7 @@ class ActionOperationSrv @Inject()(
     implicit val mat: Materializer
 ) {
 
-  lazy val logger             = Logger(getClass)
+  lazy val logger: Logger = Logger(getClass)
   lazy val alertSrv: AlertSrv = alertSrvProvider.get
 
   def findCaseEntity(entity: BaseEntity): Future[Case] = {
@@ -239,7 +239,7 @@ class ActionOperationSrv @Inject()(
               _ ← caseSrv.update(
                 caze,
                 Fields.empty.set("tags", Json.toJson((caze.tags() :+ tag).distinct)),
-                ModifyConfig(retryOnConflict = 0, version = Some(caze.version))
+                ModifyConfig(retryOnConflict = 0, seqNoAndPrimaryTerm = Some(caze.seqNo -> caze.primaryTerm))
               )
             } yield operation.updateStatus(ActionOperationStatus.Success, "")
           case AddTagToArtifact(tag, _, _) ⇒
@@ -250,7 +250,7 @@ class ActionOperationSrv @Inject()(
                   _ ← artifactSrv.update(
                     artifact.artifactId(),
                     Fields.empty.set("tags", Json.toJson((artifact.tags() :+ tag).distinct)),
-                    ModifyConfig(retryOnConflict = 0, version = Some(artifact.version))
+                    ModifyConfig(retryOnConflict = 0, seqNoAndPrimaryTerm = Some(artifact.seqNo -> artifact.primaryTerm))
                   )
                 } yield operation.updateStatus(ActionOperationStatus.Success, "")
               case _ ⇒ Future.failed(BadRequestError("Artifact not found"))
@@ -268,7 +268,7 @@ class ActionOperationSrv @Inject()(
               _ ← caseSrv.update(
                 caze,
                 Fields.empty.set("customFields", customFields),
-                ModifyConfig(retryOnConflict = 0, version = Some(caze.version))
+                ModifyConfig(retryOnConflict = 0, seqNoAndPrimaryTerm = Some(caze.seqNo -> caze.primaryTerm))
               )
             } yield operation.updateStatus(ActionOperationStatus.Success, "")
           case CloseTask(_, _) ⇒
@@ -278,7 +278,7 @@ class ActionOperationSrv @Inject()(
               _ ← taskSrv.update(
                 task,
                 Fields.empty.set("status", TaskStatus.Completed.toString).set("flag", JsFalse),
-                ModifyConfig(retryOnConflict = 0, version = Some(task.version))
+                ModifyConfig(retryOnConflict = 0, seqNoAndPrimaryTerm = Some(task.seqNo -> task.primaryTerm))
               )
             } yield operation.updateStatus(ActionOperationStatus.Success, "")
           case MarkAlertAsRead(_, _) ⇒
@@ -294,13 +294,13 @@ class ActionOperationSrv @Inject()(
           case AddArtifactToCase(data, dataType, dataMessage, _, _) ⇒
             for {
               initialCase ← findCaseEntity(entity)
-              artifact    ← artifactSrv.create(initialCase.id, Fields.empty.set("data", data).set("dataType", dataType).set("message", dataMessage))
+              _    ← artifactSrv.create(initialCase.id, Fields.empty.set("data", data).set("dataType", dataType).set("message", dataMessage))
             } yield operation.updateStatus(ActionOperationStatus.Success, "")
           case AssignCase(owner, _, _) ⇒
             for {
               initialCase ← findCaseEntity(entity)
               caze        ← caseSrv.get(initialCase.id)
-              _           ← caseSrv.update(caze, Fields.empty.set("owner", owner), ModifyConfig(retryOnConflict = 0, version = Some(caze.version)))
+              _           ← caseSrv.update(caze, Fields.empty.set("owner", owner), ModifyConfig(retryOnConflict = 0, seqNoAndPrimaryTerm = Some(caze.seqNo -> caze.primaryTerm)))
             } yield operation.updateStatus(ActionOperationStatus.Success, "")
           case AddTagToAlert(tag, _, _) ⇒
             entity match {
@@ -310,7 +310,7 @@ class ActionOperationSrv @Inject()(
                   _ ← alertSrv.update(
                     alert.id,
                     Fields.empty.set("tags", Json.toJson((alert.tags() :+ tag).distinct)),
-                    ModifyConfig(retryOnConflict = 0, version = Some(alert.version))
+                    ModifyConfig(retryOnConflict = 0, seqNoAndPrimaryTerm = Some(alert.seqNo -> alert.primaryTerm))
                   )
                 } yield operation.updateStatus(ActionOperationStatus.Success, "")
               case _ ⇒ Future.failed(BadRequestError("Alert not found"))

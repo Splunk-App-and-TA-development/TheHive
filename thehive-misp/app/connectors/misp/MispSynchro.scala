@@ -3,24 +3,22 @@ package connectors.misp
 import java.util.Date
 
 import javax.inject.{Inject, Provider, Singleton}
+
 import scala.collection.immutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
-
 import play.api.Logger
 import play.api.inject.ApplicationLifecycle
 import play.api.libs.json._
-
 import akka.NotUsed
 import akka.actor.ActorSystem
-import akka.stream.Materializer
+import akka.stream.{ActorAttributes, Materializer, Supervision}
 import akka.stream.scaladsl.{Sink, Source}
 import connectors.misp.JsonFormat.mispArtifactWrites
 import models.{Alert, AlertStatus, Artifact, CaseStatus}
 import services.{AlertSrv, ArtifactSrv, CaseSrv, UserSrv}
 import JsonFormat.mispAlertWrites
-
 import org.elastic4play.controllers.Fields
 import org.elastic4play.services.{Attachment, AuthContext, MigrationSrv, TempSrv}
 import org.elastic4play.utils.Collection
@@ -37,15 +35,21 @@ class MispSynchro @Inject()(
     tempSrv: TempSrv,
     lifecycle: ApplicationLifecycle,
     system: ActorSystem,
-    implicit val ec: ExecutionContext,
     implicit val mat: Materializer
 ) {
 
   private[misp] lazy val logger   = Logger(getClass)
   private[misp] lazy val alertSrv = alertSrvProvider.get
+  implicit val ec: ExecutionContext = try {
+    system.dispatchers.lookup("misp-thread-pools")
+  } catch {
+    case e: Throwable =>
+      logger.warn(s"Unable to use MISP specific dispatcher ($e). Fallback  to default dispatcher")
+      system.dispatcher
+  }
 
   private[misp] def initScheduler(): Unit = {
-    val task = system.scheduler.schedule(0.seconds, mispConfig.interval) {
+    val task = system.scheduler.scheduleWithFixedDelay(0.seconds, mispConfig.interval) {() =>
       if (migrationSrv.isReady) {
         logger.info("Update of MISP events is starting ...")
         userSrv
@@ -91,12 +95,14 @@ class MispSynchro @Inject()(
         case (mispConnection, lastSyncDate) ⇒
           synchronize(mispConnection, Some(lastSyncDate))
       }
+      .withAttributes(ActorAttributes.supervisionStrategy(_ ⇒ Supervision.Resume))
       .runWith(Sink.seq)
   }
 
   def fullSynchronize()(implicit authContext: AuthContext): Future[immutable.Seq[Try[Alert]]] =
     Source(mispConfig.connections.filter(_.canImport).toList)
       .flatMapConcat(mispConnection ⇒ synchronize(mispConnection, None))
+      .withAttributes(ActorAttributes.supervisionStrategy(_ ⇒ Supervision.Resume))
       .runWith(Sink.seq)
 
   def updateArtifacts(mispConnection: MispConnection, caseId: String, mispArtifacts: Seq[MispArtifact])(
@@ -112,14 +118,15 @@ class MispSynchro @Inject()(
         .map { artifact ⇒
           artifact.data().map(Left.apply).getOrElse(Right(artifact.attachment().get.name))
         }
+        .withAttributes(ActorAttributes.supervisionStrategy(_ ⇒ Supervision.Resume))
         .runWith(Sink.seq)
       newAttributes ← Future.traverse(mispArtifacts) {
-        case artifact @ MispArtifact(SimpleArtifactData(data), _, _, _, _, _) if !existingArtifacts.contains(Right(data)) ⇒
+        case artifact @ MispArtifact(SimpleArtifactData(data), _, _, _, _, _, _) if !existingArtifacts.contains(Right(data)) ⇒
           Future.successful(Fields(Json.toJson(artifact).as[JsObject]))
-        case artifact @ MispArtifact(AttachmentArtifact(Attachment(filename, _, _, _, _)), _, _, _, _, _)
+        case artifact @ MispArtifact(AttachmentArtifact(Attachment(filename, _, _, _, _)), _, _, _, _, _, _)
             if !existingArtifacts.contains(Left(filename)) ⇒
           Future.successful(Fields(Json.toJson(artifact).as[JsObject]))
-        case artifact @ MispArtifact(RemoteAttachmentArtifact(filename, reference, tpe), _, _, _, _, _)
+        case artifact @ MispArtifact(RemoteAttachmentArtifact(filename, reference, tpe), _, _, _, _, _, _)
             if !existingArtifacts.contains(Left(filename)) ⇒
           mispSrv
             .downloadAttachment(mispConnection, reference)

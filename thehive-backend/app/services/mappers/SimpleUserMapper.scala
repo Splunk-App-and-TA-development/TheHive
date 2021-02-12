@@ -20,8 +20,8 @@ class SimpleUserMapper(
 
   @Inject() def this(configuration: Configuration, ec: ExecutionContext) =
     this(
-      configuration.getOptional[String]("auth.sso.attributes.login").getOrElse("name"),
-      configuration.getOptional[String]("auth.sso.attributes.name").getOrElse("username"),
+      configuration.getOptional[String]("auth.sso.attributes.login").getOrElse("login"),
+      configuration.getOptional[String]("auth.sso.attributes.name").getOrElse("name"),
       configuration.getOptional[String]("auth.sso.attributes.roles"),
       configuration.getOptional[Seq[String]]("auth.sso.defaultRoles").getOrElse(Seq()),
       ec
@@ -34,10 +34,11 @@ class SimpleUserMapper(
       login ← (jsValue \ loginAttrName).validate[String]
       name  ← (jsValue \ nameAttrName).validate[String]
       roles = rolesAttrName.fold(defaultRoles)(r ⇒ (jsValue \ r).asOpt[Seq[String]].getOrElse(defaultRoles))
-    } yield Fields(Json.obj("login" → login, "name" → name, "roles" → roles))
+    } yield Fields(Json.obj("login" → login.toLowerCase, "name" → name, "roles" → roles))
     fields match {
       case JsSuccess(f, _) ⇒ Future.successful(f)
-      case JsError(errors) ⇒ Future.failed(AuthenticationError(s"User info fails: ${errors.map(_._1).mkString}"))
+      case JsError(errors) ⇒
+        Future.failed(AuthenticationError(s"User info fails: ${errors.map(_._2).map(_.map(_.messages.mkString(", ")).mkString("; ")).mkString}"))
     }
   }
 }
